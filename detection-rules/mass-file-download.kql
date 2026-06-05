@@ -1,0 +1,101 @@
+// ============================================================
+// RULE: Mass File Download — Potential Data Exfiltration
+// MITRE ATT&CK: T1030 — Data Transfer Size Limits (Exfiltration)
+//               T1048 — Exfiltration Over Alternative Protocol
+// Severity: High
+// Frequency: Every 15 minutes
+// Lookup Period: Last 1 hour
+// Description: Detects users downloading an unusually high volume
+//              of files from SharePoint / OneDrive within a short
+//              window — a strong indicator of insider threat or
+//              compromised account staging data for exfiltration.
+// ============================================================
+
+// --- Define thresholds ---
+let DownloadThreshold   = 50;          // Alert if > 50 files downloaded
+let TimeWindowMinutes   = 30;          // Within 30 minutes
+let LookbackPeriod      = 1h;
+
+// --- Query Office 365 / SharePoint audit logs ---
+OfficeActivity
+| where TimeGenerated >= ago(LookbackPeriod)
+| where RecordType in ("SharePointFileOperation", "OneDrive")
+| where Operation in (
+    "FileDownloaded",
+    "FileSyncDownloadedFull",
+    "FileAccessed"
+  )
+| where isnotempty(UserId)
+| where UserId !endswith "@microsoft.com"       // Exclude Microsoft service accounts
+
+// --- Aggregate downloads per user in rolling windows ---
+| summarize
+    TotalDownloads      = count(),
+    UniqueFiles         = dcount(SourceFileName),
+    FileList            = make_set(SourceFileName, 20),
+    SiteURLs            = make_set(SiteUrl, 10),
+    FirstActivity       = min(TimeGenerated),
+    LastActivity        = max(TimeGenerated),
+    ClientIPs           = make_set(ClientIP)
+  by
+    UserId,
+    bin(TimeGenerated, timespan(TimeWindowMinutes))
+
+| where TotalDownloads > DownloadThreshold
+
+// --- Calculate download rate ---
+| extend
+    DurationMinutes = datetime_diff('minute', LastActivity, FirstActivity),
+    FilesPerMinute  = round(todouble(TotalDownloads) /
+                        iff(datetime_diff('minute', LastActivity, FirstActivity) < 1,
+                            1.0,
+                            todouble(datetime_diff('minute', LastActivity, FirstActivity))
+                        ), 1)
+
+// --- Risk scoring ---
+| extend
+    RiskLevel = case(
+        TotalDownloads > 200,   "Critical",
+        TotalDownloads > 100,   "High",
+        "Medium"
+    )
+
+// --- Format output ---
+| project
+    WindowStart         = FirstActivity,
+    WindowEnd           = LastActivity,
+    UserId,
+    TotalDownloads,
+    UniqueFiles,
+    FilesPerMinute,
+    DurationMinutes,
+    ClientIPs,
+    SiteURLs,
+    SampleFiles         = FileList,
+    RiskLevel
+| extend
+    AlertDetail = strcat(
+        "[", RiskLevel, "] Mass download by [", UserId, "]: ",
+        tostring(TotalDownloads), " files in ", tostring(DurationMinutes),
+        " minutes (", tostring(FilesPerMinute), " files/min) from IPs: ",
+        tostring(ClientIPs)
+    )
+| sort by TotalDownloads desc
+
+// ============================================================
+// ENTITY MAPPINGS:
+//   Account   → UserId
+//   IP        → ClientIPs
+//   URL       → SiteURLs
+//
+// ALERT TRIGGER: Number of query results > 0
+//
+// TUNING NOTES:
+//   - Adjust DownloadThreshold based on baseline behaviour
+//   - Exclude known backup service accounts
+//   - Cross-reference with DLP alerts and HR offboarding lists
+//   - Enable Microsoft 365 connector in Sentinel for OfficeActivity logs
+//
+// PREREQUISITE:
+//   Microsoft 365 / Office 365 data connector enabled in Sentinel
+// ============================================================

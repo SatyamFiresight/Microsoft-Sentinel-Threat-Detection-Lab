@@ -1,0 +1,63 @@
+[
+  {
+    "TimeGenerated": "2024-11-15T11:30:00Z",
+    "OperationName": "Add member to role",
+    "Result": "success",
+    "InitiatedBy": {
+      "user": {
+        "userPrincipalName": "admin@contoso.com",
+        "ipAddress": "10.10.1.5"
+      }
+    },
+    "TargetResources": [
+      {
+        "displayName": "Global Administrator",
+        "userPrincipalName": "new.user@contoso.com",
+        "type": "User"
+      }
+    ],
+    "CorrelationId": "c3d4e5f6-0003-0003-0003-000000000001",
+    "_comment": "SUSPICIOUS: New user immediately assigned Global Admin role"
+  },
+  {
+    "TimeGenerated": "2024-11-15T14:20:10Z",
+    "OperationName": "Add member to role",
+    "Result": "success",
+    "InitiatedBy": {
+      "user": {
+        "userPrincipalName": "new.user@contoso.com",
+        "ipAddress": "203.0.113.55"
+      }
+    },
+    "TargetResources": [
+      {
+        "displayName": "Privileged Role Administrator",
+        "userPrincipalName": "new.user@contoso.com",
+        "type": "User"
+      }
+    ],
+    "CorrelationId": "c3d4e5f6-0003-0003-0003-000000000002",
+    "_comment": "CRITICAL: Self-assignment of Privileged Role Administrator"
+  },
+  {
+    "TimeGenerated": "2024-11-15T16:00:00Z",
+    "OperationName": "Update user",
+    "Result": "success",
+    "InitiatedBy": {
+      "user": {
+        "userPrincipalName": "it.admin@contoso.com",
+        "ipAddress": "10.10.1.20"
+      }
+    },
+    "TargetResources": [
+      {
+        "displayName": "rahul.verma@contoso.com",
+        "type": "User",
+        "modifiedProperties": [
+          { "displayName": "AccountEnabled", "oldValue": "false", "newValue": "true" }
+        ]
+      }
+    ],
+    "CorrelationId": "d4e5f6a7-0004-0004-0004-000000000001"
+  }
+]

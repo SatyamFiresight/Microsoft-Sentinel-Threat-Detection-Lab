@@ -1,0 +1,74 @@
+// ============================================================
+// RULE: Brute Force Login Detection
+// MITRE ATT&CK: T1110 — Brute Force (Credential Access)
+// Severity: High
+// Frequency: Every 5 minutes
+// Lookup Period: Last 30 minutes
+// Description: Detects accounts with 10+ failed sign-in attempts
+//              within a 30-minute window, followed by a successful
+//              login — indicating a successful brute force attack.
+// ============================================================
+
+// --- STEP 1: Identify accounts with excessive failed logins ---
+let FailedLogins = SigninLogs
+| where TimeGenerated >= ago(30m)
+| where ResultType != "0"                          // Non-zero = failed login
+| where ResultType in (
+    "50126",   // Invalid username or password
+    "50053",   // Account locked
+    "50055",   // Expired password
+    "50057"    // Disabled account
+  )
+| summarize
+    FailedCount     = count(),
+    FailedIPs       = make_set(IPAddress),
+    FirstFail       = min(TimeGenerated),
+    LastFail        = max(TimeGenerated)
+  by UserPrincipalName, AppDisplayName
+| where FailedCount >= 10;
+
+// --- STEP 2: Check for a successful login after the failures ---
+let SuccessLogins = SigninLogs
+| where TimeGenerated >= ago(30m)
+| where ResultType == "0"                          // 0 = successful login
+| project
+    UserPrincipalName,
+    SuccessTime     = TimeGenerated,
+    SuccessIP       = IPAddress,
+    Location        = LocationDetails,
+    UserAgent       = UserAgent;
+
+// --- STEP 3: Join — flag accounts that failed then succeeded ---
+FailedLogins
+| join kind=inner (SuccessLogins) on UserPrincipalName
+| where SuccessTime > LastFail                     // Success came AFTER failures
+| project
+    TimeGenerated       = SuccessTime,
+    UserPrincipalName,
+    FailedAttempts      = FailedCount,
+    FailedFromIPs       = FailedIPs,
+    SuccessfulLoginIP   = SuccessIP,
+    ApplicationName     = AppDisplayName,
+    Location,
+    UserAgent,
+    AttackWindow        = datetime_diff('minute', LastFail, FirstFail)
+| extend
+    AlertDetail = strcat(
+        "User [", UserPrincipalName, "] had ",
+        tostring(FailedAttempts),
+        " failed login attempts before successfully authenticating from IP: ",
+        SuccessfulLoginIP
+    )
+| sort by TimeGenerated desc
+
+// ============================================================
+// ENTITY MAPPINGS (configure in Sentinel UI):
+//   Account   → UserPrincipalName
+//   IP        → SuccessfulLoginIP
+//
+// ALERT TRIGGER: Number of query results > 0
+//
+// INCIDENT SETTINGS:
+//   Group alerts into incidents by: UserPrincipalName
+//   Lookback: 5 hours
+// ============================================================

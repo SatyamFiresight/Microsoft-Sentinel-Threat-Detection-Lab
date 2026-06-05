@@ -1,0 +1,96 @@
+// ============================================================
+// RULE: Suspicious PowerShell Execution
+// MITRE ATT&CK: T1059.001 — PowerShell (Execution)
+// Severity: Medium
+// Frequency: Every 10 minutes
+// Lookup Period: Last 1 hour
+// Description: Detects execution of encoded, obfuscated, or
+//              known-malicious PowerShell command patterns via
+//              Azure Activity logs and Defender for Cloud signals.
+//              Covers common attacker techniques including
+//              encoded commands, download cradles, and AMSI bypass.
+// ============================================================
+
+// --- Define suspicious PowerShell patterns ---
+let SuspiciousPatterns = dynamic([
+    "-EncodedCommand",        // Base64 encoded payload
+    "-enc ",                  // Short form of EncodedCommand
+    "-e ",                    // Shortened encode flag
+    "IEX(",                   // Invoke-Expression — common download cradle
+    "Invoke-Expression",
+    "DownloadString(",        // WebClient download cradle
+    "DownloadFile(",
+    "IWR ",                   // Invoke-WebRequest
+    "Invoke-WebRequest",
+    "Net.WebClient",
+    "amsiInitFailed",         // AMSI bypass attempt
+    "AmsiContext",
+    "Set-MpPreference",       // Defender tampering
+    "Add-MpPreference",
+    "bypass",                 // ExecutionPolicy bypass
+    "-NoP",                   // -NoProfile flag (evasion)
+    "-W Hidden",              // Hidden window (evasion)
+    "-WindowStyle Hidden",
+    "FromBase64String(",      // Base64 decoding
+    "System.Reflection"       // Reflective loading
+]);
+
+// --- Query Microsoft Defender for Cloud / Security Events ---
+SecurityEvent
+| where TimeGenerated >= ago(1h)
+| where EventID in (4688, 4103, 4104)           // Process creation, PS script block logging
+| where Process has_any ("powershell.exe", "pwsh.exe", "powershell_ise.exe")
+| where CommandLine has_any (SuspiciousPatterns)
+
+// --- Score suspiciousness based on pattern matches ---
+| extend
+    MatchedPatterns = array_length(
+        set_intersect(
+            SuspiciousPatterns,
+            dynamic([CommandLine])
+        )
+    )
+| extend
+    RiskScore = case(
+        CommandLine has_all ("-EncodedCommand", "-NoP"),        "Critical",
+        CommandLine has_any ("amsiInitFailed", "AmsiContext"),  "Critical",
+        CommandLine has_any ("IEX(", "DownloadString("),        "High",
+        CommandLine has_any ("Set-MpPreference", "-W Hidden"),  "High",
+        "Medium"
+    )
+
+// --- Format output ---
+| project
+    TimeGenerated,
+    Computer,
+    Account,
+    SubjectUserName,
+    ProcessName     = Process,
+    CommandLine,
+    RiskScore,
+    EventID,
+    ParentProcessName
+| extend
+    AlertDetail = strcat(
+        "[", RiskScore, "] Suspicious PowerShell on [", Computer,
+        "] by account [", Account, "]: ", substring(CommandLine, 0, 200)
+    )
+| sort by TimeGenerated desc
+
+// ============================================================
+// ENTITY MAPPINGS:
+//   Host      → Computer
+//   Account   → Account
+//
+// ALERT TRIGGER: Number of query results > 0
+//
+// TUNING NOTES:
+//   - Whitelist known admin scripts using the Computer or Account field
+//   - Add ParentProcess exclusions for legitimate automation tools
+//   - For richer data: enable PowerShell Script Block Logging (Event 4104)
+//     via GPO: Computer Config → Admin Templates → PS → Turn on Script Block Logging
+//
+// PREREQUISITE:
+//   Enable Security Events connector in Sentinel + configure
+//   Windows Security Event collection policy
+// ============================================================

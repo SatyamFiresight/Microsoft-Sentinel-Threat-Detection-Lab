@@ -1,0 +1,99 @@
+// ============================================================
+// RULE: Impossible Travel Detection
+// MITRE ATT&CK: T1078 — Valid Accounts (Initial Access)
+// Severity: High
+// Frequency: Every 15 minutes
+// Lookup Period: Last 3 hours
+// Description: Detects when the same user account authenticates
+//              from two geographically distant locations within
+//              a timeframe that makes physical travel impossible
+//              (threshold: >500 km in <60 minutes).
+// ============================================================
+
+// --- Fetch sign-in logs with location data ---
+let SignIns = SigninLogs
+| where TimeGenerated >= ago(3h)
+| where ResultType == "0"                             // Successful logins only
+| where isnotempty(LocationDetails)
+| extend
+    City        = tostring(LocationDetails.city),
+    State       = tostring(LocationDetails.state),
+    CountryCode = tostring(LocationDetails.countryOrRegion),
+    Latitude    = todouble(LocationDetails.geoCoordinates.latitude),
+    Longitude   = todouble(LocationDetails.geoCoordinates.longitude)
+| where isnotempty(Latitude) and isnotempty(Longitude)
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    City,
+    CountryCode,
+    Latitude,
+    Longitude,
+    AppDisplayName,
+    DeviceDetail;
+
+// --- Self-join to find login pairs per user ---
+SignIns
+| join kind=inner (
+    SignIns
+    | project
+        UserPrincipalName,
+        Time2       = TimeGenerated,
+        IP2         = IPAddress,
+        City2       = City,
+        Country2    = CountryCode,
+        Lat2        = Latitude,
+        Lon2        = Longitude
+  ) on UserPrincipalName
+| where TimeGenerated < Time2                          // Avoid duplicate pairs
+| extend
+    TimeDiffMinutes = datetime_diff('minute', Time2, TimeGenerated)
+| where TimeDiffMinutes between (1 .. 60)              // Within 1–60 minute window
+
+// --- Calculate distance using Haversine approximation ---
+| extend
+    DeltaLat    = abs(Latitude - Lat2),
+    DeltaLon    = abs(Longitude - Lon2)
+| extend
+    // Simplified distance estimate in km (accurate enough for detection)
+    DistanceKm  = sqrt(
+                    pow(DeltaLat * 111.0, 2) +
+                    pow(DeltaLon * 111.0 * cos(Latitude * 0.01745), 2)
+                  )
+| where DistanceKm > 500                               // > 500 km = impossible travel
+
+// --- Format output ---
+| project
+    FirstLoginTime      = TimeGenerated,
+    SecondLoginTime     = Time2,
+    UserPrincipalName,
+    FirstIP             = IPAddress,
+    FirstLocation       = strcat(City, ", ", CountryCode),
+    SecondIP            = IP2,
+    SecondLocation      = strcat(City2, ", ", Country2),
+    DistanceKm          = round(DistanceKm, 0),
+    TimeDiffMinutes,
+    Application         = AppDisplayName
+| extend
+    AlertDetail = strcat(
+        "Impossible travel detected for [", UserPrincipalName, "]: ",
+        tostring(round(DistanceKm, 0)), " km between ",
+        FirstLocation, " and ", SecondLocation,
+        " in ", tostring(TimeDiffMinutes), " minutes."
+    )
+| sort by FirstLoginTime desc
+
+// ============================================================
+// ENTITY MAPPINGS:
+//   Account   → UserPrincipalName
+//   IP        → FirstIP
+//   IP        → SecondIP
+//
+// ALERT TRIGGER: Number of query results > 0
+//
+// TUNING NOTES:
+//   - Increase distance threshold (500km) to reduce FP for VPN users
+//   - Add known VPN IP ranges to an exclusion watchlist
+//   - Adjust time window (60 min) based on environment
+// ============================================================

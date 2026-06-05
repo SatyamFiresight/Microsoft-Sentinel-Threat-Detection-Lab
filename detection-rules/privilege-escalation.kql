@@ -1,0 +1,86 @@
+// ============================================================
+// RULE: Privilege Escalation — New Privileged Role Assignment
+// MITRE ATT&CK: T1078.004 — Cloud Accounts (Privilege Escalation)
+// Severity: Critical
+// Frequency: Every 5 minutes
+// Lookup Period: Last 1 hour
+// Description: Detects when a user is assigned a highly privileged
+//              Azure AD / Entra ID role (Global Admin, Security Admin,
+//              etc.) — a critical indicator of privilege escalation
+//              or insider threat activity.
+// ============================================================
+
+// --- Define high-value privileged roles to monitor ---
+let PrivilegedRoles = dynamic([
+    "Global Administrator",
+    "Security Administrator",
+    "Privileged Role Administrator",
+    "User Account Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator",
+    "Conditional Access Administrator",
+    "Application Administrator",
+    "Cloud Application Administrator",
+    "Privileged Authentication Administrator"
+]);
+
+// --- Query Azure AD Audit Logs for role assignment events ---
+AuditLogs
+| where TimeGenerated >= ago(1h)
+| where OperationName in (
+    "Add member to role",
+    "Add eligible member to role",
+    "Add member to role completed (PIM activation)"
+  )
+| where Result == "success"
+
+// --- Extract role name and target user from JSON properties ---
+| extend
+    RoleName    = tostring(TargetResources[0].displayName),
+    TargetUser  = tostring(TargetResources[0].userPrincipalName),
+    InitiatedBy = tostring(InitiatedBy.user.userPrincipalName),
+    InitiatedIP = tostring(InitiatedBy.user.ipAddress)
+
+// --- Filter only for high-privilege role assignments ---
+| where RoleName in (PrivilegedRoles)
+
+// --- Flag self-assignment (especially suspicious) ---
+| extend
+    IsSelfAssignment = iff(TargetUser == InitiatedBy, true, false)
+
+// --- Format output ---
+| project
+    TimeGenerated,
+    RoleAssigned        = RoleName,
+    TargetUser,
+    AssignedBy          = InitiatedBy,
+    AssignedFromIP      = InitiatedIP,
+    IsSelfAssignment,
+    OperationName,
+    CorrelationId
+| extend
+    AlertDetail = strcat(
+        "CRITICAL: Privileged role [", RoleAssigned, "] assigned to [",
+        TargetUser, "] by [", AssignedBy, "] from IP: ", AssignedFromIP,
+        iff(IsSelfAssignment, " — ⚠️ SELF-ASSIGNMENT DETECTED", "")
+    )
+| sort by TimeGenerated desc
+
+// ============================================================
+// ENTITY MAPPINGS:
+//   Account   → TargetUser
+//   Account   → AssignedBy
+//   IP        → AssignedFromIP
+//
+// ALERT TRIGGER: Number of query results > 0
+//
+// INCIDENT SETTINGS:
+//   Priority: Critical — escalate immediately
+//   Group by: TargetUser
+//
+// RESPONSE ACTIONS:
+//   1. Verify with IT Admin if assignment was authorized
+//   2. If unauthorized → revoke role immediately
+//   3. Review all actions taken by TargetUser post-assignment
+//   4. Check if InitiatedBy account is compromised
+// ============================================================
